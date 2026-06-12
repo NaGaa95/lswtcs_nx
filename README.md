@@ -1,4 +1,9 @@
-## LEGO Star Wars: The Complete Saga — Nintendo Switch port
+<div align=center>
+
+<img src="extras/banner.png" alt="Banner" width="35%">
+
+</div>
+<h1 align=center>Lego Star Wars: The Complete Saga · Switch Port</h1>
 
 A wrapper/port of the Android release of LEGO Star Wars: The Complete Saga
 (v2.0.2.02, build 20202). It loads the original game binary `libTTapp.so`,
@@ -11,14 +16,7 @@ No game code or assets are included in this repository.
 ### How to install
 
 You need the **v2.0.2.02 (20202)** Android release.
-extract from your own legally-owned copy:
-
-* From `lib/arm64-v8a/libTTapp.so` — the 64-bit game binary.
-* The four data packs, found inside the `assets/` of the install APKs as zip
-  archives (`assetpack1`, `assetpack2`, `assetpack3`). Inside those zips the
-  files live at
-  `files/assetpacks/asset_<X>/20202/20202/assets/<X>.dat`:
-  * `Audio.dat`, `Levels.dat`, `Others.dat`, `Textures.dat`
+extract from your own legally-owned copy
 
 To install on the SD card:
 
@@ -59,24 +57,26 @@ The port reads `/switch/lswtcs/config.txt`, created on first run:
 
 ### How to build
 
-You need devkitA64 + libnx and these portlibs (`pacman -S`):
-`switch-sdl2`, `switch-mesa`, `switch-libdrm_nouveau`.
+Install the devkitPro Switch toolchain and portlibs:
 
-```
-source $DEVKITPRO/switchvars.sh
-make
+```sh
+pacman -S devkitA64 switch-tools libnx switch-sdl2 switch-mesa switch-libdrm_nouveau
 ```
 
 The bundled OpenSL ES is the AOSP "Wilhelm" implementation
-(from gm666q/opensles), built with `-DUSE_SDL -DUSE_OUTPUTMIXEXT -DLSWTCS`:
-buffer-queue audio players are mixed in software and pulled by an SDL2 audio
-callback.
+(from gm666q/opensles)
 
 ### Credits
 
 * TheOfficialFloW for the original Android so-loader (gtasa_vita).
 * gm666q for the PS Vita port this one is modeled on, and the OpenSL ES build.
 * fgsfds for max_nx / the Switch so-loader groundwork reused here.
+
+### Support
+
+If you enjoy my work and want to support me :
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/D1D1P2MOG)
 
 ### Legal
 
