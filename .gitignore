@@ -1,0 +1,8 @@
+/build/
+*.nro
+*.nacp
+*.elf
+*.map
+# never commit the copyrighted game binary or data
+libTTapp.so
+*.dat
