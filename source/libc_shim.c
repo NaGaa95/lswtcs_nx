@@ -341,6 +341,12 @@ int rename_fake(const char *from, const char *to) {
   // call to each is safe before we hand them to rename()
   const char *f = fix_path(from);
   const char *t = fix_path(to);
+  // Horizon's filesystem RenameFile FAILS if the destination already exists,
+  // whereas POSIX rename() atomically replaces it. The game saves atomically
+  // (write "<save>.incomplete", then rename over "<save>"), so without
+  // clearing the existing target first every save after the first silently
+  // fails and all progress is lost on reload. remove() gives POSIX semantics.
+  remove(t);
   return rename(f, t);
 }
 
