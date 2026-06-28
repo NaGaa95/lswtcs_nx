@@ -13,7 +13,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	LEGO Star Wars: The Complete Saga
 APP_AUTHOR	:=	naga
-APP_VERSION	:=	1.0.1
+APP_VERSION	:=	1.0.2
 BUILD		:=	build
 SOURCES		:=	source source/hooks lib/opensles/src
 DATA		:=	data

@@ -302,12 +302,53 @@ int pthread_getschedparam_soloader(pthread_t thread, int *policy, struct sched_p
   return 0;
 }
 
+enum {
+  PTHREAD_ONCE_SOLOADER_INIT = 0,
+  PTHREAD_ONCE_SOLOADER_RUNNING = 1,
+  PTHREAD_ONCE_SOLOADER_DONE = 2,
+};
+
+static pthread_mutex_t once_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t once_cond = PTHREAD_COND_INITIALIZER;
+
 int pthread_once_soloader(volatile int *once_control, void (*init_routine)(void)) {
   if (!once_control || !init_routine)
-    return -1;
-  if (__sync_lock_test_and_set(once_control, 1) == 0)
-    (*init_routine)();
-  return 0;
+    return EINVAL;
+
+  if (__atomic_load_n(once_control, __ATOMIC_ACQUIRE) == PTHREAD_ONCE_SOLOADER_DONE)
+    return 0;
+
+  pthread_mutex_lock(&once_lock);
+  for (;;) {
+    int state = __atomic_load_n(once_control, __ATOMIC_ACQUIRE);
+    if (state == PTHREAD_ONCE_SOLOADER_DONE) {
+      pthread_mutex_unlock(&once_lock);
+      return 0;
+    }
+
+    if (state == PTHREAD_ONCE_SOLOADER_INIT) {
+      __atomic_store_n(once_control, PTHREAD_ONCE_SOLOADER_RUNNING, __ATOMIC_RELEASE);
+      pthread_mutex_unlock(&once_lock);
+
+      (*init_routine)();
+
+      pthread_mutex_lock(&once_lock);
+      __atomic_store_n(once_control, PTHREAD_ONCE_SOLOADER_DONE, __ATOMIC_RELEASE);
+      pthread_cond_broadcast(&once_cond);
+      pthread_mutex_unlock(&once_lock);
+      return 0;
+    }
+
+    // A peer is still inside init_routine. POSIX requires callers to wait
+    // until the initializer has completed; returning early exposes partially
+    // initialized game singletons to other threads.
+    pthread_mutex_unlock(&once_lock);
+    extern void egl_gl_ownership_park(void);
+    egl_gl_ownership_park();
+    pthread_mutex_lock(&once_lock);
+    while (__atomic_load_n(once_control, __ATOMIC_ACQUIRE) == PTHREAD_ONCE_SOLOADER_RUNNING)
+      pthread_cond_wait(&once_cond, &once_lock);
+  }
 }
 
 // ---------------------------------------------------------------------------
