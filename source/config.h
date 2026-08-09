@@ -65,6 +65,7 @@ typedef struct {
   int screen_height;
   int language;        // -1 = follow system; else index into the lang table
   int show_fps;        // 1 = small FPS counter in the top left corner
+  int sfx_volume;      // mono WAV/SFX trim in percent; stereo Ogg/cutscenes are unaffected
 } Config;
 
 extern Config config;

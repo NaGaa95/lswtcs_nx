@@ -18,9 +18,15 @@
   CONFIG_VAR_INT(screen_width); \
   CONFIG_VAR_INT(screen_height); \
   CONFIG_VAR_INT(language); \
-  CONFIG_VAR_INT(show_fps);
+  CONFIG_VAR_INT(show_fps); \
+  CONFIG_VAR_INT(sfx_volume);
 
 Config config;
+
+// Read by the OpenSL shim through a weak external. Audio.dat stores gameplay
+// effects as mono WAV and cutscene/music streams as stereo Ogg, so this gives
+// the port a separate SFX trim without modifying the game's stereo mix.
+int opensles_mono_sfx_gain_percent = 70;
 
 // actual screen size that is in use right now
 int screen_width = 1280;
@@ -40,6 +46,8 @@ int read_config(const char *file) {
   config.screen_height = -1;
   config.language = -1;      // follow the console language
   config.show_fps = 0;       // small FPS counter in the top left corner
+  config.sfx_volume = 70;    // extra trim after equal-power mono-to-stereo routing
+  opensles_mono_sfx_gain_percent = config.sfx_volume;
 
   FILE *f = fopen(file, "r");
   if (f == NULL)
@@ -62,6 +70,12 @@ int read_config(const char *file) {
   } while (!feof(f));
 
   fclose(f);
+
+  if (config.sfx_volume < 0)
+    config.sfx_volume = 0;
+  else if (config.sfx_volume > 100)
+    config.sfx_volume = 100;
+  opensles_mono_sfx_gain_percent = config.sfx_volume;
 
   return 0;
 }

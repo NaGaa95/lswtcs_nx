@@ -54,14 +54,21 @@ static inline short clamp_i32_to_i16(int value)
     return (short)value;
 }
 
+static int output_mix_rate_hz(void)
+{
+    return (&_opensles_user_freq != NULL && _opensles_user_freq > 0) ?
+        _opensles_user_freq : 44100;
+}
+
 typedef struct {
     slPlayCallback callback;
     SLPlayItf itf;
     void *context;
     SLuint32 event;
+    CAudioPlayer *audioPlayer;
 } PendingPlayCallback;
 
-#define PLAY_CALLBACK_QUEUE_CAP 128
+#define PLAY_CALLBACK_QUEUE_CAP (MAX_TRACK * 2U)
 
 typedef struct {
     PendingPlayCallback events[PLAY_CALLBACK_QUEUE_CAP];
@@ -73,6 +80,18 @@ typedef struct {
     SLboolean started;
     SLboolean disabled;
 } PlayCallbackQueue;
+
+static void complete_play_callback(const PendingPlayCallback *event)
+{
+    CAudioPlayer *audioPlayer = event->audioPlayer;
+    assert(audioPlayer != NULL);
+    object_lock_exclusive(&audioPlayer->mObject);
+    assert(audioPlayer->mPendingPlayCallbacks > 0);
+    if (--audioPlayer->mPendingPlayCallbacks == 0) {
+        object_cond_broadcast(&audioPlayer->mObject);
+    }
+    object_unlock_exclusive(&audioPlayer->mObject);
+}
 
 static void *play_callback_thread(void *context)
 {
@@ -101,6 +120,7 @@ static void *play_callback_thread(void *context)
         if (event.callback != NULL) {
             (*event.callback)(event.itf, event.context, event.event);
         }
+        complete_play_callback(&event);
     }
 
     return NULL;
@@ -130,13 +150,14 @@ static void play_callback_queue_start(void)
     assert(0 == ok);
 }
 
-static void enqueue_play_callback(const PendingPlayCallback *event)
+static SLboolean enqueue_play_callback(const PendingPlayCallback *event)
 {
     PlayCallbackQueue *queue = &g_play_callback_queue;
     int ok = pthread_mutex_lock(&queue->mutex);
     if (ok != 0) {
-        return;
+        return SL_BOOLEAN_FALSE;
     }
+    SLboolean queued = SL_BOOLEAN_FALSE;
     if (queue->started && !queue->disabled && queue->count < PLAY_CALLBACK_QUEUE_CAP) {
         unsigned rear = queue->front + queue->count;
         if (rear >= PLAY_CALLBACK_QUEUE_CAP) {
@@ -146,9 +167,39 @@ static void enqueue_play_callback(const PendingPlayCallback *event)
         ++queue->count;
         ok = pthread_cond_signal(&queue->cond);
         assert(0 == ok);
+        queued = SL_BOOLEAN_TRUE;
     }
     ok = pthread_mutex_unlock(&queue->mutex);
     assert(0 == ok);
+    return queued;
+}
+
+static inline SLboolean track_slot_is_active(const IOutputMixExt *outputMix, unsigned index)
+{
+    assert(index < MAX_TRACK);
+    return 0 != (outputMix->mActiveMask[TRACK_MASK_WORD(index)] & TRACK_MASK_BIT(index));
+}
+
+static inline void track_slot_activate(IOutputMixExt *outputMix, unsigned index)
+{
+    assert(index < MAX_TRACK);
+    outputMix->mActiveMask[TRACK_MASK_WORD(index)] |= TRACK_MASK_BIT(index);
+}
+
+static inline void track_slot_deactivate(IOutputMixExt *outputMix, unsigned index)
+{
+    assert(index < MAX_TRACK);
+    outputMix->mActiveMask[TRACK_MASK_WORD(index)] &= ~TRACK_MASK_BIT(index);
+}
+
+static unsigned find_free_track_slot(const IOutputMixExt *outputMix)
+{
+    for (unsigned index = 0; index < MAX_TRACK; ++index) {
+        if (!track_slot_is_active(outputMix, index)) {
+            return index;
+        }
+    }
+    return MAX_TRACK;
 }
 
 
@@ -175,7 +226,19 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
             track->mFramesMixed = 0;
             audioPlayer->mPlay.mFramesSinceLastSeek += framesMixed;
             audioPlayer->mPlay.mFramesSincePositionUpdate += framesMixed;
+            const SLuint32 sampleRateMilliHz = audioPlayer->mSampleRateMilliHz;
+            if (sampleRateMilliHz != 0) {
+                audioPlayer->mPlay.mPosition = audioPlayer->mPlay.mLastSeekPosition +
+                    (SLmillisecond)(((unsigned long long)
+                    audioPlayer->mPlay.mFramesSinceLastSeek * 1000000ULL) /
+                    sampleRateMilliHz);
+            }
         }
+
+        // Positional attenuation and per-voice volume can change every game frame.
+        // Refresh them every mixer pass, including while a long queue buffer is active.
+        track->mGains[0] = audioPlayer->mGains[0];
+        track->mGains[1] = audioPlayer->mGains[1];
 
         SLboolean doBroadcast = SL_BOOLEAN_FALSE;
         const BufferHeader *oldFront;
@@ -190,6 +253,8 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
             audioPlayer->mBufferQueue.mRear = &audioPlayer->mBufferQueue.mArray[0];
             audioPlayer->mBufferQueue.mState.count = 0;
             audioPlayer->mBufferQueue.mState.playIndex = 0;
+            audioPlayer->mBufferQueue.mResamplePhase = 0;
+            audioPlayer->mBufferQueue.mHaveResampleLast = SL_BOOLEAN_FALSE;
             audioPlayer->mBufferQueue.mClearRequested = SL_BOOLEAN_FALSE;
             track->mReader = NULL;
             track->mAvail = 0;
@@ -202,10 +267,9 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
             COutputMix *outputMix = CAudioPlayer_GetOutputMix(audioPlayer);
             unsigned i = track - outputMix->mOutputMixExt.mTracks;
             assert( /* 0 <= i && */ i < MAX_TRACK);
-            unsigned mask = 1 << i;
             track->mAudioPlayer = NULL;
-            assert(outputMix->mOutputMixExt.mActiveMask & mask);
-            outputMix->mOutputMixExt.mActiveMask &= ~mask;
+            assert(track_slot_is_active(&outputMix->mOutputMixExt, i));
+            track_slot_deactivate(&outputMix->mOutputMixExt, i);
             audioPlayer->mTrack = NULL;
             audioPlayer->mDestroyRequested = SL_BOOLEAN_FALSE;
             doBroadcast = SL_BOOLEAN_TRUE;
@@ -245,9 +309,6 @@ static SLboolean track_check(Track *track, PendingPlayCallback *pending,
 #endif
             }
 
-            // copy gains from audio player to track
-            track->mGains[0] = audioPlayer->mGains[0];
-            track->mGains[1] = audioPlayer->mGains[1];
             break;
 
         case SL_PLAYSTATE_STOPPING: // application thread(s) called Play::SetPlayState(STOPPED)
@@ -281,15 +342,17 @@ broadcast:
             object_cond_broadcast(&audioPlayer->mObject);
         }
 
-        object_unlock_exclusive(&audioPlayer->mObject);
-
         if (headAtEndCallback != NULL && *pending_count < MAX_TRACK) {
             PendingPlayCallback *event = &pending[(*pending_count)++];
             event->callback = headAtEndCallback;
             event->itf = &audioPlayer->mPlay.mItf;
             event->context = headAtEndContext;
             event->event = SL_PLAYEVENT_HEADATEND;
+            event->audioPlayer = audioPlayer;
+            ++audioPlayer->mPendingPlayCallbacks;
         }
+
+        object_unlock_exclusive(&audioPlayer->mObject);
 
     }
 
@@ -319,7 +382,7 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
     unsigned pending_count = 0;
     // This lock should never block, except when the application destroys the output mix object
     object_lock_exclusive(thisObject);
-    unsigned activeMask;
+    SLboolean mixActive = SL_BOOLEAN_TRUE;
     // If the output mix is marked for destruction, then acknowledge the request
     if (this->mDestroyRequested) {
         IEngine *thisEngine = thisObject->mEngine;
@@ -331,14 +394,12 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
         // Acknowledge the destroy request, and notify the pre-destroy hook
         this->mDestroyRequested = SL_BOOLEAN_FALSE;
         object_cond_broadcast(thisObject);
-        activeMask = 0;
-    } else {
-        activeMask = this->mActiveMask;
+        mixActive = SL_BOOLEAN_FALSE;
     }
-    while (activeMask) {
-        unsigned i = ctz(activeMask);
-        assert(MAX_TRACK > i);
-        activeMask &= ~(1 << i);
+    for (unsigned i = 0; mixActive && i < MAX_TRACK; ++i) {
+        if (!track_slot_is_active(this, i)) {
+            continue;
+        }
         Track *track = &this->mTracks[i];
 
         // track is allocated
@@ -445,19 +506,50 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
             mixBufferHasData = SL_BOOLEAN_TRUE;
         }
     }
+
+    // Stereo-linked, sample-rate limiter. The old block-wide limiter changed
+    // gain once per 1024-frame callback and held the whole mix down for roughly
+    // a second after one loud SFX, which was audible as pumping/choppy dialogue.
+    // Updating per frame keeps transients safe without modulating an entire block.
+    if (mixBufferHasData) {
+        const float ceiling = 30000.0f;
+        const float release = 1.0f / (output_mix_rate_hz() * 0.080f);
+        float gain = this->mLimiterGain;
+        short *out = (short *)pBuffer;
+        for (unsigned i = 0; i < sampleCount; i += STEREO_CHANNELS) {
+            const int64_t left = mixAccum[i];
+            const int64_t right = mixAccum[i + 1];
+            const int64_t leftMagnitude = left < 0 ? -left : left;
+            const int64_t rightMagnitude = right < 0 ? -right : right;
+            const int64_t peak = leftMagnitude > rightMagnitude ?
+                leftMagnitude : rightMagnitude;
+            const float target = peak > (int64_t)ceiling ?
+                ceiling / (float)peak : 1.0f;
+            if (target < gain) {
+                gain = target; // immediate attack prevents clipping
+            } else {
+                gain += (target - gain) * release;
+            }
+            out[i] = clamp_i32_to_i16((int)(left * gain));
+            out[i + 1] = clamp_i32_to_i16((int)(right * gain));
+        }
+        this->mLimiterGain = gain;
+    } else {
+        this->mLimiterGain = 1.0f;
+    }
     object_unlock_exclusive(thisObject);
     // No active tracks, so output silence
     if (!mixBufferHasData) {
         memset(pBuffer, 0, size);
-    } else {
-        short *out = (short *)pBuffer;
-        for (unsigned i = 0; i < sampleCount; ++i) {
-            out[i] = clamp_i32_to_i16((int)mixAccum[i]);
-        }
     }
 
     for (unsigned i = 0; i < pending_count; ++i) {
-        enqueue_play_callback(&pending[i]);
+        if (!enqueue_play_callback(&pending[i])) {
+            // Queue startup failure or a full queue must not lose HEADATEND.
+            // The game callback is short and does not re-enter OpenSL.
+            (*pending[i].callback)(pending[i].itf, pending[i].context, pending[i].event);
+            complete_play_callback(&pending[i]);
+        }
     }
 
     SL_LEAVE_INTERFACE_VOID
@@ -473,7 +565,8 @@ void IOutputMixExt_init(void *self)
     play_callback_queue_start();
     IOutputMixExt *this = (IOutputMixExt *) self;
     this->mItf = &IOutputMixExt_Itf;
-    this->mActiveMask = 0;
+    memset(this->mActiveMask, 0, sizeof(this->mActiveMask));
+    this->mLimiterGain = 1.0f;
     Track *track = &this->mTracks[0];
     unsigned i;
     for (i = 0; i < MAX_TRACK; ++i, ++track) {
@@ -521,15 +614,20 @@ SLresult IOutputMixExt_checkAudioPlayerSourceSink(CAudioPlayer *this)
             pAudioSnk->pLocator)->outputMix)->mOutputMixExt;
         // allocate an entry within OutputMix for this track
         interface_lock_exclusive(omExt);
-        unsigned availMask = ~omExt->mActiveMask;
-        if (!availMask) {
+        unsigned i = find_free_track_slot(omExt);
+        if (i == MAX_TRACK) {
             interface_unlock_exclusive(omExt);
             // All track slots full in output mix
+            extern int debugPrintf(char *text, ...);
+            static unsigned limitHits = 0;
+            const unsigned hit = ++limitHits;
+            if (hit <= 8 || (hit % 100U) == 0) {
+                debugPrintf("SL: audio player limit reached (%u tracks, hit #%u)\n",
+                    (unsigned)MAX_TRACK, hit);
+            }
             return SL_RESULT_MEMORY_FAILURE;
         }
-        unsigned i = ctz(availMask);
-        assert(MAX_TRACK > i);
-        omExt->mActiveMask |= 1 << i;
+        track_slot_activate(omExt, i);
         track = &omExt->mTracks[i];
         track->mAudioPlayer = NULL;    // only field that is accessed before full initialization
         interface_unlock_exclusive(omExt);

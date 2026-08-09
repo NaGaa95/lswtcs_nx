@@ -56,9 +56,6 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
             case (SL_PLAYSTATE_STOPPED  << 2) | SL_PLAYSTATE_PLAYING:
             case (SL_PLAYSTATE_PAUSED   << 2) | SL_PLAYSTATE_PLAYING:
                 attr = ATTR_TRANSPORT;
-#ifdef LSWTCS
-                this->mLastTick = sceKernelGetProcessTimeLow();
-#endif
                 // set enqueue attribute if queue is non-empty and state becomes PLAYING
                 if ((NULL != audioPlayer) && (audioPlayer->mBufferQueue.mFront !=
                     audioPlayer->mBufferQueue.mRear)) {
@@ -67,9 +64,6 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
                 // fall through
 
             case (SL_PLAYSTATE_PLAYING  << 2) | SL_PLAYSTATE_PAUSED:
-#ifdef LSWTCS
-                this->mPosition = sceKernelGetProcessTimeLow() - this->mLastTick;
-#endif
             case (SL_PLAYSTATE_STOPPED  << 2) | SL_PLAYSTATE_PAUSED:
                 // easy
                 this->mState = state;
@@ -250,13 +244,23 @@ static SLresult IPlay_GetPosition(SLPlayItf self, SLmillisecond *pMsec)
             position = this->mPosition;
         }
 #else
-#ifdef LSWTCS
-        if (SL_PLAYSTATE_PLAYING == this->mState) {
-            const SceUInt32 tick = sceKernelGetProcessTimeLow();
-            this->mPosition += tick - this->mLastTick;
-            this->mLastTick = tick;
+#ifdef USE_OUTPUTMIXEXT
+        if (SL_OBJECTID_AUDIOPLAYER == InterfaceToObjectID(this)) {
+            // Report rendered frames, not wall-clock time. Wall time kept
+            // advancing through queue starvation and SDL stalls, causing the
+            // game to skip ahead in streamed/cutscene playback bookkeeping.
+            CAudioPlayer *audioPlayer = (CAudioPlayer *) this->mThis;
+            const SLuint32 sampleRateMilliHz = audioPlayer->mSampleRateMilliHz;
+            if (sampleRateMilliHz != 0) {
+                position = this->mLastSeekPosition +
+                    (SLmillisecond)(((unsigned long long)this->mFramesSinceLastSeek *
+                    1000000ULL) / sampleRateMilliHz);
+            } else {
+                position = this->mPosition;
+            }
+        } else {
+            position = this->mPosition;
         }
-        position = this->mPosition / 1000;
 #else
         // on other platforms we depend on periodic updates to the current position
         position = this->mPosition;
@@ -492,8 +496,5 @@ void IPlay_init(void *self)
     this->mLastSeekPosition = 0;
     this->mFramesSinceLastSeek = 0;
     this->mFramesSincePositionUpdate = 0;
-#endif
-#ifdef LSWTCS
-    this->mLastTick = 0;
 #endif
 }

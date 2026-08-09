@@ -54,6 +54,8 @@ The port reads `/switch/lswtcs/config.txt`, created on first run:
   (`0` en, `1` fr, `2` de, `3` it, `4` es, `5` ja, `6` nl, `7` pt, `8` ru,
   `9` ko, `10` zh, `11` da).
 * `show_fps` — `1` draws a small FPS counter in the top left corner
+* `sfx_volume` — mono gameplay SFX volume in percent (default `70`); this
+  affects WAV effects such as footsteps, droids, and vehicles.
 
 ### How to build
 

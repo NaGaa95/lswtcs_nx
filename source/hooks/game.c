@@ -23,9 +23,15 @@
 extern so_module game_mod; // defined in main.c
 
 typedef void (*WorldInfoFunc)(void *world_info);
+typedef void (*VoidFunc)(void);
+typedef void (*MapPlayerToPortFunc)(int player, int port);
 
 static WorldInfoFunc orig_SetLevelSfxBits;
 static WorldInfoFunc LevelSplines_InitForLevel;
+static VoidFunc orig_GamePads_Init;
+static MapPlayerToPortFunc NuPadMapPlayerToPort;
+static volatile uint8_t *game_is_pressed_start;
+static volatile uint8_t *game_not_touch_start_by_joystick;
 
 enum {
   WORLDINFO_HEAP_CURSOR_OFF = 0x108,
@@ -83,6 +89,27 @@ static void SetLevelSfxBits_safe(void *world_info) {
   }
 
   orig_SetLevelSfxBits(world_info);
+}
+
+// The Android build exposes touch as input port 0 and a physical gamepad as
+// port 1. Its automatic player assignment chooses the first connected port,
+// so touch becomes player 1 and the controller is ignored until START asks the
+// engine to remap it. Make the Switch controller player 1 before the first
+// input update; touch data remains available to the game's UI subsystem.
+static void GamePads_Init_controller_first(void) {
+  orig_GamePads_Init();
+  NuPadMapPlayerToPort(0, 1);
+
+  // The stock auto-mapper sets these when START assigns the controller. Our
+  // eager assignment intentionally bypasses that branch, so mirror its UI
+  // state as well or DrawPanel keeps rendering "Press the Start button" at
+  // the top of every in-game frame.
+  if (game_is_pressed_start)
+    *game_is_pressed_start = 1;
+  if (game_not_touch_start_by_joystick)
+    *game_not_touch_start_by_joystick = 0;
+
+  debugPrintf("mapped controller port 1 to player 1\n");
 }
 
 // libTTapp.so's internal gamepad button bitmask (from the game's own enum,
@@ -143,6 +170,22 @@ void patch_game(void) {
     debugPrintf("patched SetLevelSfxBits relocation slots: %d\n", patched);
   } else {
     debugPrintf("SetLevelSfxBits not found; cannot install level-spline crash guard\n");
+  }
+
+  orig_GamePads_Init =
+    (VoidFunc)so_try_find_addr_rx(&game_mod, "_Z13GamePads_Initv");
+  NuPadMapPlayerToPort =
+    (MapPlayerToPortFunc)so_try_find_addr_rx(&game_mod, "NuPadMapPlayerToPort");
+  game_is_pressed_start =
+    (volatile uint8_t *)so_try_find_addr_rx(&game_mod, "isPressedStart");
+  game_not_touch_start_by_joystick =
+    (volatile uint8_t *)so_try_find_addr_rx(&game_mod, "m_IsNotTouchStartByJoystick");
+  if (orig_GamePads_Init && NuPadMapPlayerToPort) {
+    const int patched = patch_relocation_slot(&game_mod, "_Z13GamePads_Initv",
+                                               (uintptr_t)GamePads_Init_controller_first);
+    debugPrintf("patched GamePads_Init relocation slots: %d\n", patched);
+  } else {
+    debugPrintf("controller-first mapping symbols missing; using stock player assignment\n");
   }
 
   // patch through the writable load_base mirror: patch_game runs before

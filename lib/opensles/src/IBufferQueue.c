@@ -43,6 +43,7 @@ static SLuint32 getAssociatedState(IBufferQueue *this)
 }
 
 extern int debugPrintf(char *text, ...);
+extern int opensles_mono_sfx_gain_percent __attribute__((weak));
 
 static void reset_buffer_header(BufferHeader *header)
 {
@@ -114,31 +115,45 @@ static int16_t pcm_read_sample(const void *buffer, SLuint32 frame,
     return src[(frame * channels) + channel];
 }
 
-static void pcm_convert_exact_up_stereo_i16(int16_t *dst, const void *buffer,
-    uint32_t in_frames, uint32_t repeat, int channels, int bps)
+static int16_t pcm_interpolate_sample(const void *buffer, uint32_t in_frames,
+    int channels, int bps, int channel, uint32_t frame, uint32_t fraction,
+    uint32_t denominator, const SLint16 previous[2], SLboolean have_previous)
 {
-    if (bps == 16) {
-        const int16_t *src = (const int16_t *)buffer;
-        for (uint32_t frame = 0; frame < in_frames; ++frame) {
-            const int16_t left = src[frame * channels];
-            const int16_t right = (channels == 1) ? left : src[frame * channels + 1];
-            for (uint32_t r = 0; r < repeat; ++r) {
-                *dst++ = left;
-                *dst++ = right;
-            }
-        }
-    } else {
-        const uint8_t *src = (const uint8_t *)buffer;
-        for (uint32_t frame = 0; frame < in_frames; ++frame) {
-            const int16_t left = (int16_t)(((int)src[frame * channels] - 0x80) << 8);
-            const int16_t right = (channels == 1) ? left :
-                (int16_t)(((int)src[frame * channels + 1] - 0x80) << 8);
-            for (uint32_t r = 0; r < repeat; ++r) {
-                *dst++ = left;
-                *dst++ = right;
-            }
-        }
+    if (frame >= in_frames) {
+        frame = in_frames - 1;
     }
+    if (channels == 1) {
+        channel = 0;
+    }
+    const int32_t second = pcm_read_sample(buffer, frame, channels, bps, channel);
+    const int32_t first = frame > 0 ?
+        pcm_read_sample(buffer, frame - 1, channels, bps, channel) :
+        (have_previous ? previous[channel] : second);
+    const int64_t weighted = (int64_t)first * (denominator - fraction) +
+        (int64_t)second * fraction;
+    return (int16_t)(weighted / denominator);
+}
+
+// A mono source is a front-centre channel, not two independent full-scale
+// channels. Equal-power distribution preserves its energy when it is routed
+// to stereo and keeps mono SFX from sounding about 3 dB louder than stereo
+// music/cutscene audio.
+static int pcm_mono_gain_q15(void)
+{
+    int percent = (&opensles_mono_sfx_gain_percent != NULL) ?
+        opensles_mono_sfx_gain_percent : 70;
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    return (23170 * percent + 50) / 100;
+}
+
+static int16_t pcm_mono_to_stereo(int16_t sample, int gain_q15)
+{
+    const int32_t scaled = (int32_t)sample * gain_q15;
+    return (int16_t)((scaled + (scaled >= 0 ? 16384 : -16384)) / 32768);
 }
 
 static void log_pcm_convert_once(uint32_t samplerate, int channels, int bps,
@@ -191,14 +206,22 @@ SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint
             } else if (!(this->samplerate == out_rate_mhz && this->channels == 2 && this->bps == 16)) {
                 const uint32_t in_frame_size = (uint32_t)this->channels * (uint32_t)bytes_per_sample;
                 const uint32_t in_frames = size / in_frame_size;
-                uint32_t out_frames = (uint32_t)((((uint64_t)in_frames * (uint64_t)out_rate_hz) +
-                    (uint64_t)(in_rate_hz / 2)) / (uint64_t)in_rate_hz);
-                if (in_frames > 0 && out_frames == 0) {
-                    out_frames = 1;
+                const uint64_t source_span = (uint64_t)in_frames * (uint64_t)out_rate_hz;
+                const uint64_t start_phase = this->mResamplePhase;
+                const uint64_t out_frames_wide = start_phase < source_span ?
+                    (source_span - start_phase + (uint64_t)in_rate_hz - 1U) /
+                        (uint64_t)in_rate_hz : 0;
+                if (in_frames == 0 || (size % in_frame_size) != 0) {
+                    result = SL_RESULT_PARAMETER_INVALID;
+                } else if (out_frames_wide > UINT32_MAX / 4U) {
+                    result = SL_RESULT_MEMORY_FAILURE;
                 }
-                const SLuint32 out_size = out_frames * (SLuint32)(2 * sizeof(int16_t));
+                const uint32_t out_frames = (uint32_t)out_frames_wide;
+                const SLuint32 out_size = out_frames * 4U;
                 const SLuint32 alloc_size = out_size ? out_size : 1;
-                if (oldRear->mOwnedBuffer != NULL &&
+                if (result != SL_RESULT_SUCCESS) {
+                    // Leave the circular queue untouched on malformed or oversized input.
+                } else if (oldRear->mOwnedBuffer != NULL &&
                         oldRear->mOwnedCapacity >= alloc_size) {
                     ownedBuffer = oldRear->mOwnedBuffer;
                 } else {
@@ -210,25 +233,41 @@ SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint
                     ownedBuffer = newBuffer;
                 }
                 if (ownedBuffer == NULL) {
-                    result = SL_RESULT_MEMORY_FAILURE;
+                    if (result == SL_RESULT_SUCCESS) {
+                        result = SL_RESULT_MEMORY_FAILURE;
+                    }
                 } else {
                     int16_t *dst = (int16_t *)ownedBuffer;
-                    if (out_rate_hz >= (int)in_rate_hz &&
-                        ((uint32_t)out_rate_hz % in_rate_hz) == 0) {
-                        pcm_convert_exact_up_stereo_i16(dst, pBuffer, in_frames,
-                            (uint32_t)out_rate_hz / in_rate_hz,
-                            this->channels, this->bps);
-                    } else {
-                        for (uint32_t of = 0; of < out_frames; of++) {
-                            uint32_t sf = (uint32_t)(((uint64_t)of * (uint64_t)in_rate_hz) /
-                                (uint64_t)out_rate_hz);
-                            if (sf >= in_frames) {
-                                sf = in_frames ? (in_frames - 1) : 0;
-                            }
-                            dst[of * 2 + 0] = pcm_read_sample(pBuffer, sf, this->channels, this->bps, 0);
-                            dst[of * 2 + 1] = pcm_read_sample(pBuffer, sf, this->channels, this->bps, 1);
+                    const int mono_gain_q15 = pcm_mono_gain_q15();
+                    for (uint32_t of = 0; of < out_frames; of++) {
+                        const uint64_t source = start_phase +
+                            (uint64_t)of * (uint64_t)in_rate_hz;
+                        const uint32_t frame = (uint32_t)(source / (uint64_t)out_rate_hz);
+                        const uint32_t fraction = (uint32_t)(source % (uint64_t)out_rate_hz);
+                        int16_t left = pcm_interpolate_sample(pBuffer, in_frames,
+                            this->channels, this->bps, 0, frame, fraction,
+                            (uint32_t)out_rate_hz, this->mResampleLast,
+                            this->mHaveResampleLast);
+                        int16_t right;
+                        if (this->channels == 1) {
+                            left = pcm_mono_to_stereo(left, mono_gain_q15);
+                            right = left;
+                        } else {
+                            right = pcm_interpolate_sample(pBuffer, in_frames,
+                                this->channels, this->bps, 1, frame, fraction,
+                                (uint32_t)out_rate_hz, this->mResampleLast,
+                                this->mHaveResampleLast);
                         }
+                        dst[of * 2 + 0] = left;
+                        dst[of * 2 + 1] = right;
                     }
+                    this->mResamplePhase = (uint32_t)(start_phase +
+                        out_frames_wide * (uint64_t)in_rate_hz - source_span);
+                    this->mResampleLast[0] = pcm_read_sample(pBuffer, in_frames,
+                        this->channels, this->bps, 0);
+                    this->mResampleLast[1] = pcm_read_sample(pBuffer, in_frames,
+                        this->channels, this->bps, 1);
+                    this->mHaveResampleLast = SL_BOOLEAN_TRUE;
                     log_pcm_convert_once(this->samplerate, this->channels, this->bps, size, out_size);
                     queueBuffer = ownedBuffer;
                     queueSize = out_size;
@@ -295,6 +334,8 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
         this->mRear = &this->mArray[0];
         this->mState.count = 0;
         this->mState.playIndex = 0;
+        this->mResamplePhase = 0;
+        this->mHaveResampleLast = SL_BOOLEAN_FALSE;
         cleared = SL_BOOLEAN_TRUE;
     } else {
         COutputMix *outputMix = CAudioPlayer_GetOutputMix(audioPlayer);
@@ -304,6 +345,8 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
             this->mRear = &this->mArray[0];
             this->mState.count = 0;
             this->mState.playIndex = 0;
+            this->mResamplePhase = 0;
+            this->mHaveResampleLast = SL_BOOLEAN_FALSE;
             track->mReader = NULL;
             track->mAvail = 0;
             object_unlock_exclusive(&outputMix->mObject);
@@ -403,6 +446,10 @@ void IBufferQueue_init(void *self)
     this->mArray = NULL;
     this->mFront = NULL;
     this->mRear = NULL;
+    this->mResamplePhase = 0;
+    this->mResampleLast[0] = 0;
+    this->mResampleLast[1] = 0;
+    this->mHaveResampleLast = SL_BOOLEAN_FALSE;
 #ifdef ANDROID
     this->mSizeConsumed = 0;
 #endif

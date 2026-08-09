@@ -496,6 +496,9 @@ typedef struct BufferQueue_interface {
 	uint32_t samplerate;
 	int channels;
 	int bps;
+	uint32_t mResamplePhase; ///< Fractional source position carried across queued PCM buffers
+	SLint16 mResampleLast[2]; ///< Last source frame, for interpolation across buffer boundaries
+	SLboolean mHaveResampleLast;
 } IBufferQueue;
 
 #define MAX_DEVICE 2
@@ -686,7 +689,11 @@ typedef struct {
     // fields that were formerly here are now at CAudioPlayer
 } IMuteSolo;
 
-#define MAX_TRACK 32        // see mActiveMask
+#define MAX_TRACK 128U
+#define TRACK_MASK_WORD_BITS 32U
+#define TRACK_MASK_WORDS ((MAX_TRACK + TRACK_MASK_WORD_BITS - 1U) / TRACK_MASK_WORD_BITS)
+#define TRACK_MASK_WORD(index) ((unsigned)(index) / TRACK_MASK_WORD_BITS)
+#define TRACK_MASK_BIT(index) ((SLuint32)1U << ((unsigned)(index) % TRACK_MASK_WORD_BITS))
 
 typedef struct {
     const struct SLOutputMixItf_ *mItf;
@@ -699,8 +706,9 @@ typedef struct {
 typedef struct {
     const struct SLOutputMixExtItf_ *mItf;
     IObject *mThis;
-    unsigned mActiveMask;   // 1 bit per active track
+    SLuint32 mActiveMask[TRACK_MASK_WORDS]; // one bit per active track
     Track mTracks[MAX_TRACK];
+    float mLimiterGain;            ///< Stateful output limiter gain, shared by mixer passes
     SLboolean mDestroyRequested;    ///< Mixer to acknowledge application's call to Object::Destroy
 } IOutputMixExt;
 #endif
@@ -732,9 +740,6 @@ typedef struct Play_interface {
     SLmillisecond mLastSeekPosition;     // Last known accurate position, set at Seek
     SLuint32 mFramesSinceLastSeek;       // Frames mixed since last known accurate position
     SLuint32 mFramesSincePositionUpdate; // Frames mixed since last position update callback
-#endif
-#ifdef LSWTCS
-    SceUInt32 mLastTick;
 #endif
 } IPlay;
 
@@ -977,6 +982,7 @@ enum AndroidObject_state {
 #ifdef USE_OUTPUTMIXEXT
     Track *mTrack;
     float mGains[STEREO_CHANNELS];  ///< Computed gain based on volume, mute, solo, stereo position
+    SLuint32 mPendingPlayCallbacks; ///< Keeps callback context alive until deferred callbacks finish
     SLboolean mDestroyRequested;    ///< Mixer to acknowledge application's call to Object::Destroy
 #endif
 #ifdef USE_SNDFILE

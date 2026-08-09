@@ -34,8 +34,7 @@
 // total silence, and every mixer-acknowledge handshake hangs with it).
 #define SWITCH_AUDIO_SAMPLES 1024
 
-/** \brief usec process clock backing the LSWTCS IPlay::GetPosition additions
- *  (drop-in for the Vita's sceKernelGetProcessTimeLow) */
+/** \brief Microsecond process clock used by mixer wait diagnostics. */
 
 SceUInt32 sceKernelGetProcessTimeLow(void)
 {
@@ -61,7 +60,13 @@ static void SDLCALL SDL_callback(void *context, Uint8 *stream, int len)
         // keep the audio mixer off the render/main cores (SDL spawned this
         // thread outside our pthread trampoline, so it'd default onto a hot core)
         pthr_pin_bg_core();
-        debugPrintf("SL: audio callback alive (len=%d)\n", len);
+        const int priorityResult = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+        s32 priority = -1;
+        const Result getPriorityResult = svcGetThreadPriority(&priority,
+            CUR_THREAD_HANDLE);
+        debugPrintf("SL: audio callback alive (len=%d, priority=%d, boost=%s)\n",
+            len, R_SUCCEEDED(getPriorityResult) ? priority : -1,
+            priorityResult == 0 ? "ok" : SDL_GetError());
         first = 0;
     }
     IEngine *thisEngine = (IEngine *) context;
@@ -91,7 +96,8 @@ void SDL_open(IEngine *thisEngine)
 
     SDL_AudioSpec fmt;
     SDL_zero(fmt);
-    fmt.freq = &_opensles_user_freq != NULL ? _opensles_user_freq : 44100;
+    fmt.freq = (&_opensles_user_freq != NULL && _opensles_user_freq > 0) ?
+        _opensles_user_freq : 44100;
     fmt.format = AUDIO_S16;
     fmt.channels = STEREO_CHANNELS;
     fmt.samples = SWITCH_AUDIO_SAMPLES;

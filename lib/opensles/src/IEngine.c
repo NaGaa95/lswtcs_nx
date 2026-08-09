@@ -182,7 +182,9 @@ static SLresult IEngine_CreateAudioPlayer(SLEngineItf self, SLObjectItf *pPlayer
                         this->mBufferQueue.samplerate = this->mDataSource.mFormat.mPCM.samplesPerSec;
                         this->mBufferQueue.channels = this->mDataSource.mFormat.mPCM.numChannels;
                         this->mBufferQueue.bps = this->mDataSource.mFormat.mPCM.bitsPerSample;
-                        this->mDataSource.mFormat.mPCM.samplesPerSec = (&_opensles_user_freq!=NULL?_opensles_user_freq:44100) * 1000;
+                        const int outputRate = (&_opensles_user_freq != NULL &&
+                                _opensles_user_freq > 0) ? _opensles_user_freq : 44100;
+                        this->mDataSource.mFormat.mPCM.samplesPerSec = outputRate * 1000;
                         this->mDataSource.mFormat.mPCM.numChannels = 2;
                         this->mDataSource.mFormat.mPCM.bitsPerSample = 16;
                         this->mBufferQueue.mNumBuffers =
@@ -212,6 +214,7 @@ static SLresult IEngine_CreateAudioPlayer(SLEngineItf self, SLObjectItf *pPlayer
 #endif
 
 #ifdef USE_OUTPUTMIXEXT
+                    this->mPendingPlayCallbacks = 0;
                     result = IOutputMixExt_checkAudioPlayerSourceSink(this);
                     if (SL_RESULT_SUCCESS != result) {
                         break;

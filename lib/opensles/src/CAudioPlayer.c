@@ -73,44 +73,47 @@ bool CAudioPlayer_PreDestroy(void *self)
 {
 #ifdef USE_OUTPUTMIXEXT
     CAudioPlayer *this = (CAudioPlayer *) self;
-    // Safe to proceed immediately if a track has not yet been assigned
     Track *track = this->mTrack;
-    if (NULL == track)
-        return true;
-    CAudioPlayer *audioPlayer = track->mAudioPlayer;
-    if (NULL == audioPlayer)
-        return true;
-    assert(audioPlayer == this);
-    // Fast path (Switch port): trylock the output mix; success means the
-    // mixer is not mid-pass, so unlink the track inline instead of blocking
-    // up to a mixer period for the handshake. (Trylock, not lock: the mixer
-    // takes outputmix->player and we hold the player.)
-    COutputMix *outputMix = CAudioPlayer_GetOutputMix(this);
-    if (object_trylock_exclusive(&outputMix->mObject)) {
-        unsigned i = track - outputMix->mOutputMixExt.mTracks;
-        assert( /* 0 <= i && */ i < MAX_TRACK);
-        unsigned mask = 1 << i;
-        assert(outputMix->mOutputMixExt.mActiveMask & mask);
-        track->mAudioPlayer = NULL;
-        outputMix->mOutputMixExt.mActiveMask &= ~mask;
-        this->mTrack = NULL;
-        object_unlock_exclusive(&outputMix->mObject);
-        return true;
+    if (NULL != track && NULL != track->mAudioPlayer) {
+        assert(track->mAudioPlayer == this);
+        // Fast path (Switch port): trylock the output mix; success means the
+        // mixer is not mid-pass, so unlink the track inline instead of blocking
+        // up to a mixer period for the handshake. (Trylock, not lock: the mixer
+        // takes outputmix->player and we hold the player.)
+        COutputMix *outputMix = CAudioPlayer_GetOutputMix(this);
+        if (object_trylock_exclusive(&outputMix->mObject)) {
+            unsigned i = track - outputMix->mOutputMixExt.mTracks;
+            assert( /* 0 <= i && */ i < MAX_TRACK);
+            const unsigned word = TRACK_MASK_WORD(i);
+            const SLuint32 bit = TRACK_MASK_BIT(i);
+            assert(outputMix->mOutputMixExt.mActiveMask[word] & bit);
+            track->mAudioPlayer = NULL;
+            outputMix->mOutputMixExt.mActiveMask[word] &= ~bit;
+            this->mTrack = NULL;
+            object_unlock_exclusive(&outputMix->mObject);
+        } else {
+            // Mixer is mid-pass: request and wait for it to unlink the track.
+            extern unsigned int sceKernelGetProcessTimeLow(void); // sl_switch.c
+            extern int debugPrintf(char *text, ...);              // util.c
+            static int waits = 0;
+            unsigned int t0 = sceKernelGetProcessTimeLow();
+            this->mDestroyRequested = true;
+            while (this->mDestroyRequested) {
+                object_cond_wait(self);
+            }
+            // Mixer thread has acknowledged the request.
+            int n = ++waits;
+            if (n <= 12 || (n % 500) == 0)
+                debugPrintf("SL: AudioPlayer destroy waited %u us for mixer (wait #%d)\n",
+                            sceKernelGetProcessTimeLow() - t0, n);
+        }
     }
-    // Mixer is mid-pass: request and wait for it to unlink the track
-    extern unsigned int sceKernelGetProcessTimeLow(void); // sl_switch.c
-    extern int debugPrintf(char *text, ...);              // util.c
-    static int waits = 0;
-    unsigned int t0 = sceKernelGetProcessTimeLow();
-    this->mDestroyRequested = true;
-    while (this->mDestroyRequested) {
+
+    // HEADATEND is dispatched on a worker. Destruction must wait until any
+    // callback that carries the game's NuVoiceAndroid context has returned.
+    while (this->mPendingPlayCallbacks != 0) {
         object_cond_wait(self);
     }
-    // Mixer thread has acknowledged the request
-    int n = ++waits;
-    if (n <= 12 || (n % 500) == 0)
-        debugPrintf("SL: AudioPlayer destroy waited %u us for mixer (wait #%d)\n",
-                    sceKernelGetProcessTimeLow() - t0, n);
 #endif
     return true;
 }

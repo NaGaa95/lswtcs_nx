@@ -184,11 +184,11 @@ static void resolve_entry_points(void) {
 // startup sequence (mirrors lswtcs-vita tt_activity_on_create / main)
 // ---------------------------------------------------------------------------
 
-static void run_startup_sequence(void) {
+static void run_startup_sequence(int gamepad_connected) {
   debugPrintf("JNI_OnLoad\n");
   JNI_OnLoad(fake_vm, NULL);
 
-  act.nativeSetGamePadConnected(fake_env, ACTIVITY_CLASS, 1);
+  act.nativeSetGamePadConnected(fake_env, ACTIVITY_CLASS, gamepad_connected);
 
   // onCreate: identity, obb info, asset paths, then start the game
   act.nativeCacheJNIVars(fake_env, ACTIVITY_CLASS);
@@ -247,6 +247,8 @@ static const PadMap pad_map[] = {
 
 static PadState pad;
 static u64 pad_prev = 0;
+static int pad_connection_known = 0;
+static int pad_connected = 0;
 
 // Switch sticks are circle-clamped (a full diagonal reads ~0.71 per axis)
 // but the game expects square axes like the d-pad's (±1, ±1) -- without this
@@ -266,6 +268,30 @@ static void stick_circle_to_square(float *x, float *y) {
 
 static void update_gamepad(void) {
   padUpdate(&pad);
+
+  const int connected = padIsConnected(&pad);
+  if (!pad_connection_known || connected != pad_connected) {
+    // Clear the Android-side state before removing the device. Otherwise a
+    // disconnect while a button/stick is held can leave that input latched.
+    if (!connected) {
+      for (unsigned i = 0; i < sizeof(pad_map) / sizeof(*pad_map); i++) {
+        if (pad_prev & pad_map[i].hid)
+          act.nativeOnKeyUp(fake_env, ACTIVITY_CLASS, pad_map[i].keycode);
+      }
+      act.nativeUpdateGamepadAxisValues(fake_env, ACTIVITY_CLASS,
+                                         0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+      pad_prev = 0;
+    }
+
+    act.nativeSetGamePadConnected(fake_env, ACTIVITY_CLASS, connected);
+    pad_connected = connected;
+    pad_connection_known = 1;
+    debugPrintf("gamepad %s\n", connected ? "connected" : "disconnected");
+  }
+
+  if (!connected)
+    return;
+
   const u64 down = padGetButtons(&pad);
   const u64 changed = down ^ pad_prev;
 
@@ -400,17 +426,23 @@ int main(void) {
   so_execute_init_array(&game_mod);
   so_free_temp(&game_mod);
 
+  // Sample HID before notifying the Android game. The old order always sent a
+  // synthetic connection before libnx had even configured a controller, then
+  // never reported disconnects or reconnects.
+  padConfigureInput(8, HidNpadStyleSet_NpadStandard);
+  padInitializeAny(&pad);
+  padUpdate(&pad);
+  pad_connected = padIsConnected(&pad);
+  pad_connection_known = 1;
+  hidInitializeTouchScreen();
+
   jni_init();
-  run_startup_sequence();
+  run_startup_sequence(pad_connected);
 
   // the first EGL bring-up ran inside the JNI natives above, on THIS thread,
   // which never calls GL again -- hand the context back or the game starves
   extern void egl_gl_ownership_release(void);
   egl_gl_ownership_release();
-
-  padConfigureInput(8, HidNpadStyleSet_NpadStandard);
-  padInitializeAny(&pad);
-  hidInitializeTouchScreen();
 
   extern volatile int egl_swap_count; // hooks/egl.c; also gates cpu boost off
 #ifdef DEBUG_LOG
@@ -428,12 +460,14 @@ int main(void) {
   int last_draw = 0, last_draw_win = 0, last_draw_pbuf = 0, last_draw_skip = 0;
   int last_park_keep = 0, last_park_rel = 0;
   int stall_beats = 0; // consecutive heartbeats with zero swaps (in-game deadman)
-#endif
   u64 ticks = 0;
+#endif
   int boosting = 1; // cpu_boost(1) was set at the top of main for the boot load
 
   while (appletMainLoop()) {
+#ifdef DEBUG_LOG
     ++ticks;
+#endif
     update_gamepad();
     update_touch();
     // ~120 Hz input polling; the game renders on its own thread
