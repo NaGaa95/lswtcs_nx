@@ -13,6 +13,7 @@
  * of the MIT license.  See the LICENSE file for details.
  */
 
+#include "saltynx.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -380,6 +381,8 @@ static void update_touch(void) {
 }
 
 int main(void) {
+  saltynx_start();
+  atexit(saltynx_stop);
   cpu_boost(1);
 
   if (read_config(CONFIG_NAME) < 0)

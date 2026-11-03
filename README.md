@@ -53,7 +53,6 @@ The port reads `/switch/lswtcs/config.txt`, created on first run:
 * `language` — `-1` follows the console language; otherwise an index
   (`0` en, `1` fr, `2` de, `3` it, `4` es, `5` ja, `6` nl, `7` pt, `8` ru,
   `9` ko, `10` zh, `11` da).
-* `show_fps` — `1` draws a small FPS counter in the top left corner
 * `sfx_volume` — mono gameplay SFX volume in percent (default `70`); this
   affects WAV effects such as footsteps, droids, and vehicles.
 
@@ -90,3 +89,8 @@ legal copy of the game.
 
 Unless noted otherwise, the source in this repository is under the MIT License
 (see LICENSE). The vendored `lib/opensles` is Apache-2.0 (AOSP).
+
+### SaltyNX telemetry
+
+FPS and render resolution are published to SaltyNX shared memory for compatible overlays. The port continues normally when SaltyNX is not running. This reports presentation timing and resolution; it does not change the game's frame cap.
+The old wrapper FPS overlay and its `show_fps` setting have been removed. Existing config entries are ignored; use a SaltyNX-compatible overlay to view FPS.

@@ -837,7 +837,6 @@ EGLBoolean eglQuerySurfaceHook(EGLDisplay dpy, EGLSurface surface, EGLint attrib
 }
 
 #include "../config.h"
-#include "../fps.h"
 
 // read by the main loop's heartbeat so debug.log shows whether the render
 // thread is still presenting after the log otherwise goes quiet
@@ -872,8 +871,6 @@ EGLBoolean eglSwapBuffersHook(EGLDisplay dpy, EGLSurface surface) {
   }
 #endif
 
-  if (config.show_fps)
-    fps_render();
 
   EGLBoolean r = eglSwapBuffers(dpy, surface);
   if (r != EGL_TRUE) {

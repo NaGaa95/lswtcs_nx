@@ -18,7 +18,6 @@
   CONFIG_VAR_INT(screen_width); \
   CONFIG_VAR_INT(screen_height); \
   CONFIG_VAR_INT(language); \
-  CONFIG_VAR_INT(show_fps); \
   CONFIG_VAR_INT(sfx_volume);
 
 Config config;
@@ -45,7 +44,6 @@ int read_config(const char *file) {
   config.screen_width = -1;  // auto (picks 720p handheld / 1080p docked)
   config.screen_height = -1;
   config.language = -1;      // follow the console language
-  config.show_fps = 0;       // small FPS counter in the top left corner
   config.sfx_volume = 70;    // extra trim after equal-power mono-to-stereo routing
   opensles_mono_sfx_gain_percent = config.sfx_volume;
 

@@ -37,6 +37,9 @@ ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 # SDL2: OpenSL ES audio backend. EGL/GLESv2/glapi/drm_nouveau: mesa/nouveau GL.
+# Publish all EGL presentation paths, including guest import tables.
+LDFLAGS += -Wl,--wrap=eglSwapBuffers,--wrap=eglGetProcAddress,--wrap=__libnx_exit
+
 LIBS	:= -lSDL2 -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lnx -lm
 
 #---------------------------------------------------------------------------------
